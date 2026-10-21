@@ -14,26 +14,40 @@ const MODELS = [
 const FALLBACK_STATUSES = [404, 503];
 const RETRY_ROUNDS = 2;
 const RETRY_DELAY_MS = 3000;
+const REQUEST_TIMEOUT_MS = 90000;
+const TOTAL_DEADLINE_MS = 180000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function tryModel(model, body) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }
-  );
-  return response.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      }
+    );
+    return await response.json();
+  } catch (err) {
+    if (err.name !== "AbortError") throw err;
+    return { error: { code: 503, message: `Gemini model ${model} took too long to respond. Please try again.` } };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function generateContent(body) {
   let lastError;
+  const deadline = Date.now() + TOTAL_DEADLINE_MS;
   for (let round = 0; round < RETRY_ROUNDS; round++) {
     if (round > 0) await sleep(RETRY_DELAY_MS);
     for (const model of MODELS) {
+      if (Date.now() > deadline) throw lastError || new Error("Gemini took too long to respond. Please try again.");
       const data = await tryModel(model, body);
       if (!data.error) return data;
 
