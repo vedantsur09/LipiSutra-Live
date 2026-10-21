@@ -1,30 +1,22 @@
-const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY;
+import { generateContent } from "./geminiClient";
 
 async function callEngine(base64Image, prompt, temperature) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inlineData: { mimeType: "image/jpeg", data: base64Image } },
-            { text: prompt }
-          ]
-        }],
-        generationConfig: {
-          temperature: temperature,
-          topK: 32,
-          topP: 0.95,
-          maxOutputTokens: 8192,
-          responseMimeType: "application/json"
-        }
-      })
+  const data = await generateContent({
+    contents: [{
+      parts: [
+        { inlineData: { mimeType: "image/jpeg", data: base64Image } },
+        { text: prompt }
+      ]
+    }],
+    generationConfig: {
+      temperature: temperature,
+      topK: 32,
+      topP: 0.95,
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json"
     }
-  );
+  });
   
-  const data = await response.json();
   if (!data.candidates) {
     console.error("Gemini API error:", JSON.stringify(data));
     throw new Error(data.error?.message || "Gemini API returned no result");
