@@ -5,6 +5,8 @@ import MapSection from "./MapSection";
 import UploadSection from "./UploadSection";
 
 const langCodes = { hi: "hi-IN", gu: "gu-IN", te: "te-IN", en: "en-US" };
+const LOW_LEGIBILITY_RATIO = 0.15;
+const LOW_ACCURACY_PERCENT = 60;
 
 export default function PublicView({ theme }) {
   const [image, setImage] = useState(null);
@@ -36,6 +38,16 @@ export default function PublicView({ theme }) {
       alert(`Search feature hooked to Firebase query for: ${searchQuery}`);
     }
   }
+
+  // Flags results where the AI had to guess a large share of the words
+  const isLowLegibility = (res) => {
+    const transcript = res?.transcript || "";
+    const totalWords = transcript.replace(/<[^>]+>/g, " ").split(/\s+/).filter(Boolean).length;
+    if (totalWords === 0) return false;
+    const uncertainWords = (transcript.match(/<predict[^>]*>|<reconstruct>|\[अस्पष्ट\]/g) || []).length;
+    const accuracy = parseInt(String(res?.overallAccuracy || "").replace("%", ""), 10);
+    return uncertainWords / totalWords > LOW_LEGIBILITY_RATIO || (!isNaN(accuracy) && accuracy < LOW_ACCURACY_PERCENT);
+  };
 
   const renderTranscription = (transcript) => {
     if (!transcript) return <span className="opacity-50">No transcript extracted.</span>;
@@ -295,6 +307,13 @@ export default function PublicView({ theme }) {
                       </span>
                     )}
                   </div>
+                  {isLowLegibility(result) && (
+                    <div className="mb-6 px-5 py-4 rounded-2xl border border-red-500/60 bg-red-900/20 text-red-200 text-sm leading-relaxed">
+                      <span className="font-black tracking-widest uppercase text-xs text-red-400">Low legibility</span>
+                      <span className="mx-2">·</span>
+                      Large parts of this document could not be read with confidence. Highlighted words are AI guesses, and [अस्पष्ट] marks unreadable text. Expert verification is recommended before citing names or dates.
+                    </div>
+                  )}
                   <div className="backdrop-blur-2xl p-10 md:p-16 rounded-3xl"
                        style={{ backgroundColor: theme.headerBg, border: `1.5px solid ${theme.border}`, boxShadow: theme.cardShadow }}>
                     <div className="text-lg md:text-xl font-serif leading-[2.4] drop-shadow-sm" style={{ color: theme.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>

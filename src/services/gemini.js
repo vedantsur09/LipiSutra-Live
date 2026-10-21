@@ -49,30 +49,38 @@ Schema Contract (Must be populated in this EXACT order):
   "locations": ["Array of geographical locations identified (empty if none)"]
 }
 
-CRITICAL: You MUST generate the transcript first. Only AFTER it is reconstructed should you read it to generate the modernMarathi and summary. Generate a global percentage string (e.g., '85%') for overallAccuracy.`;
+CRITICAL: You MUST generate the transcript first. Only AFTER it is reconstructed should you read it to generate the modernMarathi and summary. Generate a global percentage string (e.g., '85%') for overallAccuracy.
+
+HONESTY RULES — THESE OVERRIDE EVERYTHING ELSE:
+1. NEVER invent proper nouns (people, rulers, titles, places), dates or numbers. Write them only if their letters are actually visible in the image.
+2. If a word cannot be read and the surrounding text does not make it near-certain, write [अस्पष्ट] instead of guessing.
+3. NEVER repeat phrases to fill space. Each line of the transcript must correspond to a real line in the image.
+4. Before answering, check that script, era, names and dates agree with each other. If they conflict, drop the unsupported claim and set "era" to "Uncertain".
+5. overallAccuracy must reflect the share of words read with certainty. If most words are predicted, reconstructed or [अस्पष्ट], it must be below 50%.
+6. The summary must not state names or dates that appear only inside <predict> or <reconstruct> tags; call them "possibly" instead.`;
 
   let finalPayload;
 
   if (isDamaged) {
-    console.log(">>> [ROUTER] Artifact damaged. Engaging ENGINE 2 (The Reconstructor) at 0.7 Temp...");
+    console.log(">>> [ROUTER] Artifact damaged. Engaging ENGINE 2 (The Reconstructor) at 0.2 Temp...");
     const engine2Prompt = `You are a speculative paleographer operating a 'Fill-in-the-Blanks' pipeline.
 
 STRICT FORMATTING RULES — THESE OVERRIDE EVERYTHING ELSE:
 1. NO ARTIFICIAL SPACING: Output natural, complete Devanagari/Modi words only. NEVER split a word into individual characters or syllables with spaces (e.g., output "शिवाजी" NEVER "श ि व ा ज ी"). Each word is a single unbroken token.
 2. MINIMAL TAGGING: The vast majority of the transcript must be plain, untagged text. If a word is clearly legible, it gets NO tags whatsoever.
 3. STRICT <predict>: Use <predict confidence="0.x">word</predict> ONLY for words that are highly faded or partially visible but can still be partially read. Do NOT wrap every word. Reserve this for genuinely uncertain words.
-4. STRICT <reconstruct>: Use <reconstruct>word</reconstruct> ONLY for completely destroyed or physically missing sections where you are inferring from context alone with zero visible evidence. This should be rare.
+4. STRICT <reconstruct>: Use <reconstruct>word</reconstruct> ONLY for completely destroyed or physically missing sections where the surrounding text makes the word near-certain (e.g. a standard formula). Otherwise write [अस्पष्ट]. This should be rare.
 
 Now execute this sequence:
 Step 1: Read and transliterate all perfectly visible text literally. Do not alter it.
 Step 2: Identify the torn/missing gaps.
-Step 3: Predict ONLY the missing words to fill those gaps.
+Step 3: Predict ONLY the missing words that context makes near-certain; mark every other gap as [अस्पष्ट].
 Step 4: Apply <predict> tags ONLY to faded-but-readable words. Route to aiPredictions array.
 Step 5: Apply <reconstruct> tags ONLY to completely missing words. Route to reconstructionNeeded array.
 Step 6: Output combined plain text and minimally-tagged predictions into the final transcript string.
 ${schemaContract}`;
     
-    finalPayload = await callEngine(base64Image, engine2Prompt, 0.7);
+    finalPayload = await callEngine(base64Image, engine2Prompt, 0.2);
   } else {
     console.log(">>> [ROUTER] Artifact pristine. Engaging ENGINE 1 (Literal OCR) at 0.1 Temp...");
     const engine1Prompt = `Transliterate and translate exactly what is visible. Do not guess. Return the JSON object defined in the Schema Contract below. Provide empty arrays for aiPredictions and reconstructionNeeded.
