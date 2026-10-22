@@ -1,13 +1,15 @@
 import { useState, useEffect } from "react";
 import { db } from "../services/firebase";
 import { collection, onSnapshot, orderBy, query } from "firebase/firestore";
+import { normalizeDocument, parseAccuracy } from "../utils/documents";
+
+const PULSE_DURATION_MS = 1500;
 
 function useCountUp(target, duration = 1200) {
   const [value, setValue] = useState(0);
   useEffect(() => {
-    if (target === 0) { setValue(0); return; }
     let start = 0;
-    const step = Math.ceil(target / (duration / 16));
+    const step = Math.max(1, Math.ceil(target / (duration / 16)));
     const timer = setInterval(() => {
       start += step;
       if (start >= target) { setValue(target); clearInterval(timer); }
@@ -34,33 +36,31 @@ export default function MuseumView({ theme }) {
   const animConf = useCountUp(stats.avgConfidence);
 
   useEffect(() => {
+    let pulseTimer;
     const q = query(collection(db, "documents"), orderBy("timestamp", "desc"));
     const unsub = onSnapshot(q, (snapshot) => {
-      const allDocs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const allDocs = snapshot.docs.map(d => normalizeDocument(d.id, d.data()));
       setDocs(allDocs);
 
-      let confSum = 0, confCount = 0;
-      let digitized = 0, pending = 0;
-      allDocs.forEach(data => {
-        if (data.status === "verified") digitized++;
-        else pending++;
-        if (data.ai_output && data.ai_output.confidence) {
-          confSum += data.ai_output.confidence;
-          confCount++;
-        }
-      });
+      const withAccuracy = allDocs.filter(d => d.overallAccuracy !== undefined);
+      const accuracySum = withAccuracy.reduce((sum, d) => sum + parseAccuracy(d.overallAccuracy), 0);
+      const digitized = allDocs.filter(d => d.isVerified).length;
 
       setStats({
         totalDocs: allDocs.length,
         digitizedCount: digitized,
-        pendingCount: pending,
-        avgConfidence: confCount > 0 ? Math.round((confSum / confCount) * 100) : 0,
+        pendingCount: allDocs.length - digitized,
+        avgConfidence: withAccuracy.length > 0 ? Math.round(accuracySum / withAccuracy.length) : 0,
       });
 
       setPulseTotal(true);
-      setTimeout(() => setPulseTotal(false), 1500);
-    });
-    return () => unsub();
+      clearTimeout(pulseTimer);
+      pulseTimer = setTimeout(() => setPulseTotal(false), PULSE_DURATION_MS);
+    }, (error) => console.error("Museum dashboard failed to load:", error));
+    return () => {
+      unsub();
+      clearTimeout(pulseTimer);
+    };
   }, []);
 
   const recentFive = docs.slice(0, 5);
@@ -111,15 +111,15 @@ export default function MuseumView({ theme }) {
                 {recentFive.length === 0 && (
                   <tr><td colSpan={4} className="px-6 py-8 text-center opacity-50" style={{ color: theme.subtext }}>No documents in collection yet.</td></tr>
                 )}
-                {recentFive.map((d, i) => (
-                  <tr key={i} className="transition-colors" style={{ backgroundColor: theme.surface }}>
-                    <td className="px-6 py-4 font-mono text-xs" style={{ color: theme.text }}>{d.name || d.id.slice(0, 20) + "..."}</td>
-                    <td className="px-6 py-4" style={{ color: theme.subtext }}>{d.ai_output?.script || "—"}</td>
+                {recentFive.map(d => (
+                  <tr key={d.id} className="transition-colors" style={{ backgroundColor: theme.surface }}>
+                    <td className="px-6 py-4 font-mono text-xs" style={{ color: theme.text }}>{d.id.slice(0, 20) + "..."}</td>
+                    <td className="px-6 py-4" style={{ color: theme.subtext }}>{d.script || "—"}</td>
                     <td className="px-6 py-4">
-                      <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${d.status === "verified" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                      <span className={`px-3 py-1 rounded-full text-xs font-semibold border ${d.isVerified ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
                           "bg-amber-500/10 text-amber-400 border-amber-500/20"
                         }`}>
-                        {d.status === "verified" ? "✅ Verified" : "⏳ Pending"}
+                        {d.isVerified ? "✅ Verified" : "⏳ Pending"}
                       </span>
                     </td>
                     <td className="px-6 py-4 text-xs" style={{ color: theme.subtext }}>{d.timestamp?.toDate?.() ? d.timestamp.toDate().toLocaleString() : "In-flight..."}</td>

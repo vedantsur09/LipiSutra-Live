@@ -1,42 +1,73 @@
 import { useState } from "react";
 import { translateText } from "../services/translate";
 import { speakText } from "../services/tts";
+import { stripAnnotationTags, parseAccuracy } from "../utils/documents";
+import { isSupportedImage, readFileAsBase64 } from "../utils/images";
 import MapSection from "./MapSection";
 import UploadSection from "./UploadSection";
 
 const langCodes = { hi: "hi-IN", gu: "gu-IN", te: "te-IN", en: "en-US" };
 const LOW_LEGIBILITY_RATIO = 0.15;
 const LOW_ACCURACY_PERCENT = 60;
+const DEFAULT_PREDICTION_CONFIDENCE = 0.5;
+const ANNOTATION_SPLIT = /(<predict[^>]*>[\s\S]*?<\/predict>|<reconstruct[^>]*>[\s\S]*?<\/reconstruct>|<verified[^>]*>[\s\S]*?<\/verified>)/g;
 
 export default function PublicView({ theme }) {
   const [image, setImage] = useState(null);
   const [base64, setBase64] = useState(null);
+  const [mimeType, setMimeType] = useState("image/jpeg");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [lang, setLang] = useState("hi");
   const [translation, setTranslation] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState("summary"); // "summary", "transcript", "translation", "origin"
+  const [activeTab, setActiveTab] = useState("summary"); // "summary", "translation", "origin"
   const [isTranslating, setIsTranslating] = useState(false);
 
-  function handleFileDrop(e) {
-    e.preventDefault();
-    const file = e.dataTransfer ? e.dataTransfer.files[0] : e.target.files[0];
-    if (!file) return;
-
-    setImage(URL.createObjectURL(file));
-    const reader = new FileReader();
-    reader.onload = () => setBase64(reader.result.split(",")[1]);
-    reader.readAsDataURL(file);
-    setResult(null);
+  // A new result (or none) always starts on the summary tab with no stale translation
+  function handleResult(nextResult) {
+    setResult(nextResult);
     setTranslation("");
     setActiveTab("summary");
   }
 
-  function handleSearch(e) {
-    if (e.key === "Enter") {
-      alert(`Search feature hooked to Firebase query for: ${searchQuery}`);
+  function clearImage() {
+    if (image) URL.revokeObjectURL(image);
+    setImage(null);
+    setBase64(null);
+  }
+
+  function handleReset() {
+    clearImage();
+    handleResult(null);
+    setLoading(false);
+  }
+
+  async function handleFileDrop(e) {
+    e.preventDefault();
+    const file = e.dataTransfer ? e.dataTransfer.files[0] : e.target.files[0];
+    if (e.target?.value) e.target.value = "";
+    if (!file) return;
+    if (!isSupportedImage(file)) {
+      alert("Please upload an image file (JPG, PNG or WebP).");
+      return;
     }
+
+    clearImage();
+    handleResult(null);
+    setImage(URL.createObjectURL(file));
+    setMimeType(file.type);
+    try {
+      setBase64(await readFileAsBase64(file));
+    } catch (err) {
+      console.error("Could not read image:", err);
+      alert("Could not read this image. Please try another file.");
+      handleReset();
+    }
+  }
+
+  function handleLangChange(nextLang) {
+    setLang(nextLang);
+    setTranslation("");
   }
 
   // Flags results where the AI had to guess a large share of the words
@@ -44,23 +75,27 @@ export default function PublicView({ theme }) {
     const transcript = res?.transcript || "";
     const totalWords = transcript.replace(/<[^>]+>/g, " ").split(/\s+/).filter(Boolean).length;
     if (totalWords === 0) return false;
-    const uncertainWords = (transcript.match(/<predict[^>]*>|<reconstruct>|\[अस्पष्ट\]/g) || []).length;
-    const accuracy = parseInt(String(res?.overallAccuracy || "").replace("%", ""), 10);
-    return uncertainWords / totalWords > LOW_LEGIBILITY_RATIO || (!isNaN(accuracy) && accuracy < LOW_ACCURACY_PERCENT);
+    const uncertainWords = (transcript.match(/<predict[^>]*>|<reconstruct[^>]*>|\[अस्पष्ट\]/g) || []).length;
+    const hasAccuracy = res?.overallAccuracy !== undefined && res?.overallAccuracy !== null && res?.overallAccuracy !== "";
+    return uncertainWords / totalWords > LOW_LEGIBILITY_RATIO || (hasAccuracy && parseAccuracy(res.overallAccuracy) < LOW_ACCURACY_PERCENT);
   };
 
   const renderTranscription = (transcript) => {
     if (!transcript) return <span className="opacity-50">No transcript extracted.</span>;
     
     // Split by <predict>, <reconstruct>, or <verified> tags
-    const parts = transcript.split(/(<predict[^>]*>.*?<\/predict>|<reconstruct>.*?<\/reconstruct>|<verified>.*?<\/verified>)/g);
+    const parts = transcript.split(ANNOTATION_SPLIT);
     
     return parts.map((part, i) => {
       if (!part) return null;
       
-      const predictMatch = part.match(/<predict\s+confidence="([^"]+)">([^<]+)<\/predict>/);
+      const predictMatch = part.match(/^<predict([^>]*)>([\s\S]*)<\/predict>$/);
       if (predictMatch) {
-        const confidence = parseFloat(predictMatch[1]);
+        const confidenceMatch = predictMatch[1].match(/confidence\s*=\s*["']?([\d.]+)/);
+        const parsedConfidence = confidenceMatch ? parseFloat(confidenceMatch[1]) : NaN;
+        const confidence = isNaN(parsedConfidence)
+          ? DEFAULT_PREDICTION_CONFIDENCE
+          : Math.min(parsedConfidence > 1 ? parsedConfidence / 100 : parsedConfidence, 1);
         const word = predictMatch[2];
         const opacity = Math.min(Math.max(confidence, 0.2), 0.9);
         
@@ -75,7 +110,7 @@ export default function PublicView({ theme }) {
         );
       }
       
-      const reconstructMatch = part.match(/<reconstruct>([^<]+)<\/reconstruct>/);
+      const reconstructMatch = part.match(/^<reconstruct[^>]*>([\s\S]*)<\/reconstruct>$/);
       if (reconstructMatch) {
         const word = reconstructMatch[1];
         return (
@@ -89,7 +124,7 @@ export default function PublicView({ theme }) {
         );
       }
       
-      const verifiedMatch = part.match(/<verified>([^<]+)<\/verified>/);
+      const verifiedMatch = part.match(/^<verified[^>]*>([\s\S]*)<\/verified>$/);
       if (verifiedMatch) {
         const word = verifiedMatch[1];
         return (
@@ -149,7 +184,7 @@ export default function PublicView({ theme }) {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 mt-8 animate-[fadeIn_0.5s_ease-out]">
 
           {/* Left Column: Artifact Preview */}
-          <UploadSection image={image} setImage={setImage} base64={base64} setBase64={setBase64} loading={loading} setLoading={setLoading} onResult={setResult} theme={theme} />
+          <UploadSection image={image} base64={base64} mimeType={mimeType} loading={loading} setLoading={setLoading} onResult={handleResult} onReset={handleReset} theme={theme} />
 
 
           {/* Right Column: Loading Skeleton or Tabbed Results */}
@@ -241,7 +276,7 @@ export default function PublicView({ theme }) {
                         <div className="animate-[fadeIn_0.4s_ease-out]">
                           <h4 className="text-[10px] font-black tracking-widest uppercase mb-8" style={{ color: theme.subtext }}>Decryption & Translation Layer</h4>
                           <div className="flex flex-col sm:flex-row gap-4 mb-10 p-6 rounded-xl border shadow-inner" style={{ backgroundColor: theme.surface, borderColor: theme.border }}>
-                            <select value={lang} onChange={e => setLang(e.target.value)} className="flex-1 px-6 py-4 rounded-xl focus:outline-none font-bold text-xs tracking-widest uppercase" style={{ backgroundColor: theme.headerBg, borderColor: theme.border, color: theme.accent }}>
+                            <select value={lang} onChange={e => handleLangChange(e.target.value)} className="flex-1 px-6 py-4 rounded-xl focus:outline-none font-bold text-xs tracking-widest uppercase" style={{ backgroundColor: theme.headerBg, borderColor: theme.border, color: theme.accent }}>
                               <option value="en">English (Universal)</option>
                               <option value="hi">हिन्दी (Hindi)</option>
                               <option value="gu">ગુજરાતી (Gujarati)</option>
@@ -251,7 +286,7 @@ export default function PublicView({ theme }) {
                               onClick={async () => {
                                 setIsTranslating(true);
                                 try {
-                                  const t = await translateText(result.modernMarathi || result.transcript, lang);
+                                  const t = await translateText(stripAnnotationTags(result.modernMarathi || result.transcript), lang);
                                   setTranslation(t);
                                 } catch (e) {
                                   console.error(e);
@@ -272,8 +307,7 @@ export default function PublicView({ theme }) {
                             <div className="p-8 rounded-xl border-t-[3px] shadow-inner" style={{ backgroundColor: theme.surface, borderColor: theme.accent }}>
                               <p className="text-lg leading-relaxed mb-10 font-light" style={{ color: theme.text }}>{translation}</p>
                               <button onClick={() => {
-                                  const cleanText = (translation || '').replace(/<predict[^>]*>/g, '').replace(/<\/predict>/g, '').replace(/<reconstruct>/g, '').replace(/<\/reconstruct>/g, '');
-                                  speakText(cleanText, langCodes[lang]);
+                                  speakText(stripAnnotationTags(translation), langCodes[lang]);
                                 }} 
                                       className="px-10 py-4 rounded-xl text-[10px] font-black tracking-[0.2em] uppercase transition-all hover:-translate-y-1 flex items-center justify-center gap-3 w-full sm:w-auto"
                                       style={{ backgroundColor: theme.accentGlow, color: theme.buttonText, boxShadow: theme.cardShadow }}

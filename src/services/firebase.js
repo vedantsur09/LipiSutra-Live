@@ -1,8 +1,10 @@
 import { initializeApp } from "firebase/app";
-import { 
-  getFirestore, collection, addDoc, serverTimestamp, 
+import {
+  getFirestore, collection, addDoc, serverTimestamp,
   query, orderBy, limit, getDocs, setDoc, doc, getDoc, updateDoc, increment
 } from "firebase/firestore";
+import { ANALYSIS_VERSION } from "./gemini";
+import { toResult } from "../utils/documents";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -16,16 +18,24 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 
+// Returns a stored result for this image, or null when it must be (re-)analysed.
+// Historian-verified records always win; unverified AI results are reused only
+// if they were produced by the current prompts.
 export async function checkExistingHash(hash) {
   console.log('>>> [CACHE_CHECK] checkExistingHash Initiated for hash:', hash);
   try {
-    const docRef = doc(db, "documents", hash);
-    const docSnap = await getDoc(docRef);
+    const docSnap = await getDoc(doc(db, "documents", hash));
     if (docSnap.exists()) {
       const data = docSnap.data();
       console.log('>>> [CACHE_CHECK] HIT! Found existing document, status:', data.status);
-      if (data.status === 'verified') return data.historian_output;
-      if (data.status === 'pending') return data.ai_output;
+      const isVerified = data.status === 'verified' || data.editedOnce === true;
+      if (isVerified || data.analysis_version === ANALYSIS_VERSION) {
+        updateDoc(docSnap.ref, { searchCount: increment(1) })
+          .catch(e => console.warn("searchCount increment failed", e));
+        return toResult(data);
+      }
+      console.log('>>> [CACHE_CHECK] Stored AI result is from older prompts, re-analysing.');
+      return null;
     }
     console.log('>>> [CACHE_CHECK] MISS! Document does not exist in Firebase.');
   } catch (err) {
@@ -34,15 +44,18 @@ export async function checkExistingHash(hash) {
   return null;
 }
 
-export async function saveDocument(geminiResult, role, hash) {
+export async function saveDocument(geminiResult, role, hash, imageThumb) {
   console.log('>>> [SAVE_DOC] saveDocument Initiated for hash:', hash);
   try {
     await setDoc(doc(db, "documents", hash), {
-      view_count: 1,
+      searchCount: 1,
       status: 'pending',
       priority_score: 80,
+      analysis_version: ANALYSIS_VERSION,
+      uploaded_by_role: role,
       ai_output: geminiResult,
       historian_output: null,
+      image_thumb: imageThumb || null,
       timestamp: serverTimestamp()
     });
     console.log('>>> [SAVE_DOC] SUCCESS: Wrote to Firestore successfully.');

@@ -1,10 +1,17 @@
 import { generateContent } from "./geminiClient";
 
-async function callEngine(base64Image, prompt, temperature) {
+// Bump whenever the prompts change so cached AI results from older prompts are re-analysed
+export const ANALYSIS_VERSION = 2;
+
+const MAX_OUTPUT_TOKENS = 16384;
+
+class GeminiParseError extends Error {}
+
+async function callEngine(base64Image, mimeType, prompt, temperature) {
   const data = await generateContent({
     contents: [{
       parts: [
-        { inlineData: { mimeType: "image/jpeg", data: base64Image } },
+        { inlineData: { mimeType, data: base64Image } },
         { text: prompt }
       ]
     }],
@@ -12,27 +19,61 @@ async function callEngine(base64Image, prompt, temperature) {
       temperature: temperature,
       topK: 32,
       topP: 0.95,
-      maxOutputTokens: 8192,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
       responseMimeType: "application/json"
     }
   });
-  
-  if (!data.candidates) {
-    console.error("Gemini API error:", JSON.stringify(data));
-    throw new Error(data.error?.message || "Gemini API returned no result");
+
+  const candidate = data.candidates?.[0];
+  const raw = (candidate?.content?.parts || [])
+    .filter(part => part.text && !part.thought)
+    .map(part => part.text)
+    .join("");
+
+  if (!raw) {
+    console.error("Gemini returned no text:", JSON.stringify(data));
+    const reason = candidate?.finishReason || data.promptFeedback?.blockReason;
+    throw new Error(reason ? `Gemini returned no result (${reason}). Please try another image.` : "Gemini returned no result.");
   }
-  
-  const raw = data.candidates[0].content.parts[0].text;
-  return JSON.parse(raw.trim());
+
+  try {
+    return JSON.parse(raw.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "").trim());
+  } catch {
+    const tooLong = candidate?.finishReason === "MAX_TOKENS";
+    throw new GeminiParseError(tooLong
+      ? "This document is too long to analyse in one pass. Try cropping it into smaller sections."
+      : "Gemini returned an unreadable response. Please try again.");
+  }
 }
 
-export async function analyzeDocument(base64Image) {
+function normalizeAccuracy(value) {
+  const number = parseFloat(String(value ?? "").replace("%", ""));
+  if (isNaN(number)) return undefined;
+  return `${Math.round(number <= 1 ? number * 100 : number)}%`;
+}
+
+function normalizeLocations(locations) {
+  if (!Array.isArray(locations)) return [];
+  return locations.filter(loc =>
+    (typeof loc === "string" && loc.trim()) ||
+    (loc && typeof loc.name === "string" && loc.name.trim())
+  );
+}
+
+export async function analyzeDocument(base64Image, mimeType = "image/jpeg") {
   console.log(">>> [ROUTER] Firing Gatekeeper Pre-Scan...");
   
   const gatekeeperPrompt = `Analyze the physical condition of this manuscript. Is it torn, severely degraded, blurred, or physically missing text? Return ONLY exactly {"is_damaged": true} or {"is_damaged": false}.`;
   
-  const gatekeeperResult = await callEngine(base64Image, gatekeeperPrompt, 0.0);
-  const isDamaged = gatekeeperResult.is_damaged === true;
+  let isDamaged = false;
+  try {
+    const gatekeeperResult = await callEngine(base64Image, mimeType, gatekeeperPrompt, 0.0);
+    isDamaged = gatekeeperResult.is_damaged === true;
+  } catch (err) {
+    // An unparseable pre-scan should not block the main analysis
+    if (!(err instanceof GeminiParseError)) throw err;
+    console.warn(">>> [ROUTER] Gatekeeper response unreadable, assuming undamaged.");
+  }
   console.log(">>> [ROUTER] Gatekeeper analysis: is_damaged =", isDamaged);
 
   const schemaContract = `
@@ -46,8 +87,10 @@ Schema Contract (Must be populated in this EXACT order):
   "reconstructionNeeded": ["Array of words inside <reconstruct> tags"],
   "modernMarathi": "translation into modern Marathi",
   "summary": "2-3 sentence English summary",
-  "locations": ["Array of geographical locations identified (empty if none)"]
+  "locations": [{"name": "place named in the document", "lat": 0.0, "lng": 0.0}]
 }
+
+For "locations", list only places actually named in the document (empty array if none), with your best known latitude and longitude for each.
 
 CRITICAL: You MUST generate the transcript first. Only AFTER it is reconstructed should you read it to generate the modernMarathi and summary. Generate a global percentage string (e.g., '85%') for overallAccuracy.
 
@@ -80,19 +123,21 @@ Step 5: Apply <reconstruct> tags ONLY to completely missing words. Route to reco
 Step 6: Output combined plain text and minimally-tagged predictions into the final transcript string.
 ${schemaContract}`;
     
-    finalPayload = await callEngine(base64Image, engine2Prompt, 0.2);
+    finalPayload = await callEngine(base64Image, mimeType, engine2Prompt, 0.2);
   } else {
     console.log(">>> [ROUTER] Artifact pristine. Engaging ENGINE 1 (Literal OCR) at 0.1 Temp...");
     const engine1Prompt = `Transliterate and translate exactly what is visible. Do not guess. Return the JSON object defined in the Schema Contract below. Provide empty arrays for aiPredictions and reconstructionNeeded.
 ${schemaContract}`;
 
-    finalPayload = await callEngine(base64Image, engine1Prompt, 0.1);
+    finalPayload = await callEngine(base64Image, mimeType, engine1Prompt, 0.1);
   }
 
-  // Ensure arrays exist naturally to prevent undefined map crashes downstream safely
-  finalPayload.aiPredictions = finalPayload.aiPredictions || [];
-  finalPayload.reconstructionNeeded = finalPayload.reconstructionNeeded || [];
-  finalPayload.locations = finalPayload.locations || [];
-
-  return finalPayload;
+  // Normalise fields so the UI never receives undefined arrays or odd accuracy formats
+  return {
+    ...finalPayload,
+    overallAccuracy: normalizeAccuracy(finalPayload.overallAccuracy),
+    aiPredictions: Array.isArray(finalPayload.aiPredictions) ? finalPayload.aiPredictions : [],
+    reconstructionNeeded: Array.isArray(finalPayload.reconstructionNeeded) ? finalPayload.reconstructionNeeded : [],
+    locations: normalizeLocations(finalPayload.locations)
+  };
 }

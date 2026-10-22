@@ -3,6 +3,7 @@ import Navbar from "./components/Navbar";
 import PublicView from "./components/PublicView";
 import HistorianView from "./components/HistorianView";
 import MuseumView from "./components/MuseumView";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 import backImg from "./assets/back.jpg";
 
@@ -38,11 +39,19 @@ export default function App() {
   const [page, setPage] = useState("home"); // "home", "archives"
 
   const [themeMode, setThemeMode] = useState(() => {
-    return localStorage.getItem("themePreference") || "DARK";
+    try {
+      return localStorage.getItem("themePreference") || "DARK";
+    } catch {
+      return "DARK";
+    }
   });
 
   useEffect(() => {
-    localStorage.setItem("themePreference", themeMode);
+    try {
+      localStorage.setItem("themePreference", themeMode);
+    } catch {
+      // Storage can be unavailable (private mode); the theme still works for this visit
+    }
   }, [themeMode]);
 
   const theme = themeMode === "DARK" ? DARK : LIGHT;
@@ -84,11 +93,11 @@ export default function App() {
 
       <Navbar currentView={view} onViewChange={setView} currentPage={page} onPageChange={setPage} theme={theme} />
       <main className="flex-1 overflow-x-hidden relative z-10 w-full animate-[fadeIn_0.5s_ease-out]">
-            <>
-               {view === "public" && <PublicView theme={theme} />}
-               {view === "historian" && <HistorianView theme={theme} />}
-               {view === "museum" && <MuseumView theme={theme} />}
-            </>
+        <ErrorBoundary key={view} theme={theme}>
+          {view === "public" && <PublicView theme={theme} />}
+          {view === "historian" && <HistorianView theme={theme} />}
+          {view === "museum" && <MuseumView theme={theme} />}
+        </ErrorBoundary>
       </main>
     </div>
   );

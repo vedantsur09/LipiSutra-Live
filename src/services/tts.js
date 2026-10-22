@@ -1,10 +1,9 @@
+import { stripAnnotationTags } from "../utils/documents";
+
 export function speakText(text, langCode = "hi-IN") {
   // Strip all XML prediction/reconstruction tags before speaking
-  const cleanText = (text || "")
-    .replace(/<predict[^>]*>/g, "")
-    .replace(/<\/predict>/g, "")
-    .replace(/<reconstruct>/g, "")
-    .replace(/<\/reconstruct>/g, "");
+  const cleanText = stripAnnotationTags(text);
+  const langPrefix = langCode.split("-")[0];
 
   if (!window.speechSynthesis) {
     console.error("Web Speech API not supported in this browser.");
@@ -15,20 +14,18 @@ export function speakText(text, langCode = "hi-IN") {
   window.speechSynthesis.cancel();
 
   const utterance = new SpeechSynthesisUtterance(cleanText);
-  utterance.lang = "hi-IN";
+  utterance.lang = langCode;
   utterance.volume = 1;
   utterance.rate = 0.9;
   utterance.pitch = 1;
 
   function assignVoiceAndSpeak() {
     const voices = window.speechSynthesis.getVoices();
-    const indicVoice = voices.find(v =>
-      v.name.includes("Google हिन्दी") ||
-      v.lang.includes("hi") ||
-      v.lang.includes("mr")
-    );
-    if (indicVoice) {
-      utterance.voice = indicVoice;
+    // Prefer a voice for the chosen language, falling back to Hindi/Marathi for Indic text
+    const voice = voices.find(v => v.lang.toLowerCase().startsWith(langPrefix)) ||
+      (langPrefix === "en" ? null : voices.find(v => v.lang.startsWith("hi") || v.lang.startsWith("mr")));
+    if (voice) {
+      utterance.voice = voice;
     }
     window.speechSynthesis.speak(utterance);
   }

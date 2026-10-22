@@ -1,14 +1,56 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 const GOOGLE_KEY = import.meta.env.VITE_MAPS_KEY || import.meta.env.VITE_VISION_KEY;
+const INDIA_CENTER = { lat: 20.5937, lng: 78.9629 };
+const SINGLE_PIN_ZOOM = 8;
+
+let mapsLoader = null;
+
+// Loads the Google Maps script once, no matter how often the map is mounted
+function loadGoogleMaps() {
+  if (window.google?.maps) return Promise.resolve(window.google);
+  if (!mapsLoader) {
+    mapsLoader = new Promise((resolve, reject) => {
+      window.initLipisutraMap = () => resolve(window.google);
+      const script = document.createElement("script");
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_KEY}&callback=initLipisutraMap`;
+      script.async = true;
+      script.onerror = () => {
+        mapsLoader = null;
+        reject(new Error("Google Maps failed to load"));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return mapsLoader;
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, ch => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+// Locations are either plain names or { name, lat, lng } objects from the AI
+function getLocationName(loc) {
+  return typeof loc === "string" ? loc : loc?.name || "";
+}
+
+function hasCoordinates(loc) {
+  return loc && typeof loc === "object" && Number.isFinite(Number(loc.lat)) && Number.isFinite(Number(loc.lng));
+}
 
 export default function MapSection({ locations, theme }) {
-  useEffect(() => {
-    const initMap = () => {
-      if (!window.google) return;
+  const mapRef = useRef(null);
 
-      const map = new window.google.maps.Map(document.getElementById("heritage-map"), {
-        center: { lat: 20.5937, lng: 78.9629 }, // Default India center
+  useEffect(() => {
+    let cancelled = false;
+
+    loadGoogleMaps().then(google => {
+      if (cancelled || !mapRef.current) return;
+
+      const map = new google.maps.Map(mapRef.current, {
+        center: INDIA_CENTER,
         zoom: 5,
         disableDefaultUI: true,
         styles: [
@@ -21,66 +63,68 @@ export default function MapSection({ locations, theme }) {
         ]
       });
 
-      if (locations && locations.length > 0) {
-        const geocoder = new window.google.maps.Geocoder();
-        const bounds = new window.google.maps.LatLngBounds();
-        let validLocations = 0;
+      const bounds = new google.maps.LatLngBounds();
+      let pinCount = 0;
 
-        locations.forEach(loc => {
-          geocoder.geocode({ address: loc }, (results, status) => {
-            if (status === 'OK' && results[0]) {
-              const geometry = results[0].geometry;
-              const marker = new window.google.maps.Marker({
-                position: geometry.location,
-                map,
-                title: loc,
-                icon: { 
-                  path: window.google.maps.SymbolPath.CIRCLE, 
-                  scale: 12,
-                  fillColor: "#FCD34D", 
-                  fillOpacity: 0.9, 
-                  strokeColor: "#D4AF37", 
-                  strokeWeight: 2 
-                }
-              });
-
-              const info = new window.google.maps.InfoWindow({
-                content: `<div style="background:#131A2B;color:#F8F9FA;padding:16px;border-radius:12px;border:1px solid rgba(212,175,55,0.3);font-family:'Inter',sans-serif">
-                  <strong style="color:#D4AF37;font-size:15px;font-family:'Cinzel',serif">${loc}</strong>
-                  <span style="font-size:12px;color:#94A3B8;margin-top:8px;display:block">Identified from document analysis</span>
-                </div>`
-              });
-
-              marker.addListener("click", () => info.open(map, marker));
-
-              bounds.extend(geometry.location);
-              validLocations++;
-
-              if (validLocations === 1) {
-                map.setCenter(geometry.location);
-                map.setZoom(8);
-                info.open(map, marker);
-              } else {
-                map.fitBounds(bounds);
-              }
-            } else {
-              console.error(`>>> [GEOCODER ERROR] Failed to find location: '${loc}'. Google Maps Status: ${status}`);
-            }
-          });
+      const addPin = (name, position) => {
+        if (cancelled) return;
+        const marker = new google.maps.Marker({
+          position,
+          map,
+          title: name,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 12,
+            fillColor: "#FCD34D",
+            fillOpacity: 0.9,
+            strokeColor: "#D4AF37",
+            strokeWeight: 2
+          }
         });
-      }
-    };
 
-    if (window.google) {
-      initMap();
-    } else {
-      const script = document.createElement("script");
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_KEY}&callback=initLipisutraMap`;
-      script.async = true;
-      window.initLipisutraMap = initMap;
-      document.head.appendChild(script);
-    }
+        const info = new google.maps.InfoWindow({
+          content: `<div style="background:#131A2B;color:#F8F9FA;padding:16px;border-radius:12px;border:1px solid rgba(212,175,55,0.3);font-family:'Inter',sans-serif">
+            <strong style="color:#D4AF37;font-size:15px;font-family:'Cinzel',serif">${escapeHtml(name)}</strong>
+            <span style="font-size:12px;color:#94A3B8;margin-top:8px;display:block">Identified from document analysis</span>
+          </div>`
+        });
+        marker.addListener("click", () => info.open(map, marker));
+
+        bounds.extend(position);
+        pinCount++;
+        if (pinCount === 1) {
+          map.setCenter(position);
+          map.setZoom(SINGLE_PIN_ZOOM);
+          info.open(map, marker);
+        } else {
+          map.fitBounds(bounds);
+        }
+      };
+
+      const geocoder = new google.maps.Geocoder();
+      (locations || []).forEach(loc => {
+        const name = getLocationName(loc);
+        if (!name) return;
+        if (hasCoordinates(loc)) {
+          addPin(name, { lat: Number(loc.lat), lng: Number(loc.lng) });
+          return;
+        }
+        geocoder.geocode({ address: name }, (results, status) => {
+          if (status === "OK" && results[0]) {
+            addPin(name, results[0].geometry.location);
+          } else {
+            console.warn(`>>> [GEOCODER] Could not place '${name}' (status: ${status})`);
+          }
+        });
+      });
+    }).catch(err => console.error(">>> [MAP]", err.message));
+
+    return () => {
+      cancelled = true;
+    };
   }, [locations]);
+
+  const locationCount = locations?.length || 0;
 
   return (
     <div className="rounded-xl overflow-hidden border shadow-xl" style={{ backgroundColor: theme.headerBg, borderColor: theme.border, boxShadow: theme.cardShadow }}>
@@ -88,11 +132,11 @@ export default function MapSection({ locations, theme }) {
         <div>
           <h2 className="text-lg font-heading mb-1" style={{ color: theme.accent }}>🗺️ Heritage Map</h2>
           <p className="text-xs" style={{ color: theme.subtext }}>
-            {locations && locations.length > 0 ? `Displaying ${locations.length} origin sites via AI Auto-Pin.` : "Atlas overview of historical records."}
+            {locationCount > 0 ? `Displaying ${locationCount} origin sites via AI Auto-Pin.` : "No places were named in this document."}
           </p>
         </div>
       </div>
-      <div id="heritage-map" className="w-full h-[400px]" style={{ backgroundColor: theme.bg }} />
+      <div ref={mapRef} className="w-full h-[400px]" style={{ backgroundColor: theme.bg }} />
     </div>
   );
 }

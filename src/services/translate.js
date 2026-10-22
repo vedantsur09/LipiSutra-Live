@@ -6,7 +6,13 @@ export async function translateText(text, targetLang) {
     const data = await generateContent({
       contents: [{ parts: [{ text: prompt }] }]
     });
-    return data.candidates[0].content.parts[0].text;
+    const translated = (data.candidates?.[0]?.content?.parts || [])
+      .filter(part => part.text && !part.thought)
+      .map(part => part.text)
+      .join("")
+      .trim();
+    if (!translated) throw new Error("Gemini returned an empty translation.");
+    return translated;
   } catch (err) {
     console.error("Translation API Error:", err);
     return "Error: Could not translate the text. " + err.message;
